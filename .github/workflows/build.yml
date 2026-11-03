@@ -124,8 +124,20 @@ jobs:
       - name: Update feeds & install
         run: |
           cd openwrt
-          ./scripts/feeds update -a
+          # 网络抖动重试, 最多 3 次
+          for i in 1 2 3; do
+            if ./scripts/feeds update -a; then break; fi
+            echo "::warning::feeds update 第 $i 次失败, 重试..."
+            sleep 10
+          done
           ./scripts/feeds install -a
+          echo "=== 已安装的第三方 feed 包 ==="
+          ls -d feeds/openclash/* feeds/lucky/* feeds/adguardhome/* 2>/dev/null || true
+          echo "=== 关键包是否存在 ==="
+          for p in luci-app-openclash luci-app-lucky luci-app-adguardhome; do
+            r=$(find package feeds -maxdepth 5 -type d -name "$p" 2>/dev/null | head -1)
+            if [ -n "$r" ]; then echo "OK   $p -> $r"; else echo "MISS $p"; fi
+          done
 
       - name: diy-part2.sh (post-install package selection)
         run: |
