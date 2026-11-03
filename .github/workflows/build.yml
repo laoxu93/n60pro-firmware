@@ -127,10 +127,14 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: diy-part2.sh (post-install tweaks)
+      - name: diy-part2.sh (post-install package selection)
         run: |
           cd openwrt
-          ./diy-part2.sh
+          if [ "$PLUGINS" = "minimal" ]; then
+            ./diy-part2.sh minimal
+          else
+            ./diy-part2.sh full
+          fi
 
       - name: Sanity check target
         run: |
@@ -142,21 +146,41 @@ jobs:
             exit 1
           fi
 
-      - name: Generate .config (defconfig + validate)
+      - name: Generate .config (defconfig + STRICT validate)
         run: |
           cd openwrt
-          make defconfig || true
+          # 备份我们手工写入的包选择
+          cp .config .config.diy
+          make defconfig
           echo "=== after defconfig ==="
           grep -E '^CONFIG_TARGET_(BOARD|PROFILE)' .config
-          for p in luci-app-openclash; do
-            if grep -q "CONFIG_PACKAGE_${p}=y" .config; then
-              echo "OK  ${p}"
+
+          # defconfig 会剔除它认为"未安装"的包, 这里逐个复查
+          MISSING=""
+          for p in luci-app-openclash dnsmasq-full; do
+            if ! grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+              echo "::error::${p} 被 defconfig 剔除"
+              MISSING="${MISSING} ${p}"
             else
-              echo "::warning::${p} 未进入 .config (可能被依赖冲突剔除)"
+              echo "OK  ${p}"
             fi
           done
-          echo "=== 依赖冲突检查 ==="
-          grep -E '^CONFIG_PACKAGE_dnsmasq' .config || echo "dnsmasq 未选中"
+          if [ -n "$MISSING" ]; then
+            echo "以下包在 defconfig 后消失: $MISSING"
+            echo "--- package/ 下实际存在吗? ---"
+            for p in $MISSING; do
+              echo -n "$p: "; find package feeds -maxdepth 4 -type d -name "$p" 2>/dev/null | head -1 || echo "NOT FOUND"
+            done
+            echo "--- 相关配置行 ---"
+            grep -E "^#? ?CONFIG_PACKAGE_(luci-app-openclash|dnsmasq)" .config || true
+            exit 1
+          fi
+          echo "=== 冲突检查: dnsmasq 必须关闭 ==="
+          if grep -q "^CONFIG_PACKAGE_dnsmasq=y" .config; then
+            echo "::error::dnsmasq 与 dnsmasq-full 冲突"
+            exit 1
+          fi
+          echo "全部关键包校验通过"
 
       - name: Download package sources
         run: |
@@ -170,6 +194,32 @@ jobs:
           cd openwrt
           make -j$(nproc) V=s 2>&1 | tee build.log
           exit ${PIPESTATUS[0]}
+
+      - name: Verify firmware manifest contains plugins
+        if: success()
+        run: |
+          cd openwrt
+          MANIFEST=$(find bin/targets -name '*.manifest' | head -1)
+          echo "manifest: $MANIFEST"
+          [ -z "$MANIFEST" ] && { echo "::error::找不到 manifest"; exit 1; }
+          echo "--- 全部插件包 ---"
+          grep -E 'luci-app-|luci-theme-' "$MANIFEST" || true
+
+          FAIL=0
+          REQ="luci-app-openclash dnsmasq-full"
+          if [ "$PLUGINS" = "full" ]; then
+            REQ="$REQ luci-app-lucky luci-app-adguardhome"
+          fi
+          for p in $REQ; do
+            if grep -q "^${p} " "$MANIFEST"; then
+              echo "OK   ${p}"
+            else
+              echo "::error::固件中缺少 ${p}"
+              FAIL=1
+            fi
+          done
+          [ "$FAIL" = "1" ] && exit 1
+          echo "=== 固件包清单校验通过 ==="
 
       - name: Collect artifacts
         if: always()
