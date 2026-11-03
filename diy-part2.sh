@@ -57,44 +57,44 @@ echo "  已禁用: dnsmasq(换full) / passwall* / ssr-plus / docker*"
 
 # ---------- 2. libffi 补丁 (关键修复) ----------
 echo "[diy-part2] 2. libffi 交叉编译路径修复"
+
+# 用 find 定位, 不硬编码路径
+# 注意: package/feeds/packages/libffi 通常是符号链接 -> feeds/packages/libs/libffi
+#       sed -i 会破坏符号链接, 必须先 readlink -f 解析真实路径
+LIBFFI_LINK=$(find package feeds -maxdepth 5 -type d -name libffi 2>/dev/null | head -1)
 LIBFFI_MK=""
-for p in package/feeds/packages/libs/libffi package/libs/libffi; do
-  if [ -f "$p/Makefile" ]; then LIBFFI_MK="$p/Makefile"; break; fi
-done
+
+if [ -n "$LIBFFI_LINK" ]; then
+  echo "  定位到: $LIBFFI_LINK"
+  # 解析符号链接真实路径
+  LIBFFI_REAL=$(readlink -f "$LIBFFI_LINK")
+  echo "  真实路径: $LIBFFI_REAL"
+  for cand in "$LIBFFI_REAL/Makefile" "$LIBFFI_LINK/Makefile"; do
+    if [ -f "$cand" ]; then LIBFFI_MK="$cand"; break; fi
+  done
+fi
 
 if [ -n "$LIBFFI_MK" ]; then
-  echo "  找到: $LIBFFI_MK"
-  # 问题: 24.10 的 libffi Makefile 里写的是
+  echo "  使用 Makefile: $LIBFFI_MK"
+  cp "$LIBFFI_MK" "$LIBFFI_MK.n60bak"
+
+  # 问题: 24.10 的 libffi Makefile 写的是
   #   $(CP) $(PKG_BUILD_DIR)/$(GNU_TARGET_NAME)*/fficonfig.h $(1)/usr/include/
-  # 交叉编译时该目录可能不存在, 导致 cp 失败 -> 编译中断
-  # 修复: 改为 make 的 shell 函数实时 find, 找不到时回退到 PKG_BUILD_DIR 根
-  if grep -q 'GNU_TARGET_NAME\*/fficonfig.h' "$LIBFFI_MK"; then
-    sed -i 's|\$(PKG_BUILD_DIR)/\$(GNU_TARGET_NAME)\*/fficonfig\.h|\$(shell find \$(PKG_BUILD_DIR) -name fficonfig.h -print -quit)|g' "$LIBFFI_MK"
-    echo "  libffi fficonfig.h -> find 动态查找 已修补"
+  # 但交叉编译时 fficonfig.h 实际生成在 PKG_BUILD_DIR 根或 mediatek/ 子目录,
+  # 不匹配 GNU_TARGET_NAME* 通配 -> cp 失败 -> 整包中断
+  # 修复: 替换为 make 的 shell 函数实时 find
+  if grep -q 'GNU_TARGET_NAME)\*/fficonfig\.h' "$LIBFFI_MK"; then
+    sed -i 's|\$(PKG_BUILD_DIR)/\$(GNU_TARGET_NAME)\*/fficonfig\.h|$(shell find $(PKG_BUILD_DIR) -name fficonfig.h -print -quit)|g' "$LIBFFI_MK"
+    echo "  已替换 GNU_TARGET_NAME* -> shell find"
   else
-    echo "  该版本无 GNU_TARGET_NAME*/fficonfig.h 写法, 跳过"
+    echo "  [warn] 未匹配到 GNU_TARGET_NAME*/fficonfig.h 写法"
   fi
 
-  # 兜底: 若 find 仍为空, 在 Build/Compile 后生成一个占位 fficonfig.h
-  if ! grep -q 'libffi_gen_fficonfig' "$LIBFFI_MK"; then
-    cat >> "$LIBFFI_MK" << 'MKEOF'
-
-# N60Pro 兜底: 确保 Build/InstallDev 一定能找到 fficonfig.h
-define Build/InstallDev
-	$(call Build/InstallDev/libffi,$(1))
-	$(INSTALL_DIR) $(1)/usr/include
-	-$(CP) $(PKG_BUILD_DIR)/$(GNU_TARGET_NAME)*/fficonfig.h $(1)/usr/include/ 2>/dev/null
-	-$(CP) $(PKG_BUILD_DIR)/fficonfig.h $(1)/usr/include/ 2>/dev/null
-	-find $(PKG_BUILD_DIR) -name fficonfig.h -exec $(CP) {} $(1)/usr/include/ \; 2>/dev/null
-endef
-MKEOF
-    echo "  libffi 兜底 Build/InstallDev 已追加"
-  fi
-
-  echo "  补丁后检查:"
-  grep -n 'fficonfig' "$LIBFFI_MK" || echo "    (无 fficonfig 行)"
+  echo "  补丁后 fficonfig 行:"
+  grep -n 'fficonfig' "$LIBFFI_MK" || echo "    (无)"
 else
-  echo "  [warn] 未找到 libffi Makefile, 跳过补丁"
+  echo "::error::找不到 libffi Makefile, 无法修补, 中止以避免编译失败"
+  exit 1
 fi
 
 # ---------- 3. 包选择 ----------
