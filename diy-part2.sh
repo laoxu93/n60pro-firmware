@@ -80,12 +80,16 @@ if [ -n "$LIBFFI_MK" ]; then
 
   # 问题: 24.10 的 libffi Makefile 写的是
   #   $(CP) $(PKG_BUILD_DIR)/$(GNU_TARGET_NAME)*/fficonfig.h $(1)/usr/include/
-  # 但交叉编译时 fficonfig.h 实际生成在 PKG_BUILD_DIR 根或 mediatek/ 子目录,
-  # 不匹配 GNU_TARGET_NAME* 通配 -> cp 失败 -> 整包中断
-  # 修复: 替换为 make 的 shell 函数实时 find
+  # 但交叉编译时 fficonfig.h 实际生成在 PKG_BUILD_DIR/mediatek/fficonfig.h
+  # (config.status: build in mediatek), 不匹配 GNU_TARGET_NAME* 通配 -> cp 失败
+  # 上一版修复用 $(shell find ...) 也失败: make 在 $(call) 展开 define 时就
+  # 求值 $(shell ...), 那时 configure 还没生成 fficonfig.h, find 返回空,
+  # InstallDev 里就变成 cp -fpR <空> <目标>, 报 missing destination file operand
+  # 修复: 只把 $(GNU_TARGET_NAME)* 换成 * , 保留 shell 通配符, 让 cp 在
+  # InstallDev 执行时( configure 之后 )再展开, 匹配 mediatek/fficonfig.h
   if grep -q 'GNU_TARGET_NAME)\*/fficonfig\.h' "$LIBFFI_MK"; then
-    sed -i 's|\$(PKG_BUILD_DIR)/\$(GNU_TARGET_NAME)\*/fficonfig\.h|$(shell find $(PKG_BUILD_DIR) -name fficonfig.h -print -quit)|g' "$LIBFFI_MK"
-    echo "  已替换 GNU_TARGET_NAME* -> shell find"
+    sed -i 's|\$(PKG_BUILD_DIR)/\$(GNU_TARGET_NAME)\*/fficonfig\.h|$(PKG_BUILD_DIR)/*/fficonfig.h|g' "$LIBFFI_MK"
+    echo "  已替换 GNU_TARGET_NAME* -> * (shell glob, 运行时展开)"
   else
     echo "  [warn] 未匹配到 GNU_TARGET_NAME*/fficonfig.h 写法"
   fi
